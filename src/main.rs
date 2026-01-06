@@ -1,8 +1,9 @@
 use clap::Parser;
 use colored::*;
-use std::collections::HashMap;
-use std::fs;
-use std::io::{self, BufRead};
+use netstat2::{
+    get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState,
+};
+use std::collections::HashSet;
 use sysinfo::{Pid, System};
 
 #[derive(Parser)]
@@ -27,8 +28,6 @@ struct ProcessInfo {
     local_addr: String,
     state: Option<String>,
 }
-
-type SocketInfo = (u64, String, Option<String>); // (inode, address, state)
 
 fn main() {
     let cli = Cli::parse();
@@ -60,166 +59,92 @@ fn print_not_found(port: u16) {
 }
 
 fn is_root() -> bool {
-    unsafe { libc::geteuid() == 0 }
+    #[cfg(unix)]
+    {
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(windows)]
+    {
+        // Windows doesn't have a simple root check, assume false
+        false
+    }
 }
 
 fn find_port_owners(
     port: u16,
     check_all: bool,
 ) -> Result<Vec<ProcessInfo>, Box<dyn std::error::Error>> {
-    let sockets = collect_sockets(port, check_all)?;
+    let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
+    let proto_flags = if check_all {
+        ProtocolFlags::TCP | ProtocolFlags::UDP
+    } else {
+        ProtocolFlags::TCP
+    };
+
+    let sockets = get_sockets_info(af_flags, proto_flags)?;
     let sys = System::new_all();
-    let mut seen_pids = HashMap::new();
+    let mut seen_pids = HashSet::new();
+    let mut results = Vec::new();
 
-    Ok(sockets
-        .into_iter()
-        .filter_map(|(inode, addr, state, proto)| {
-            let pid = find_pid_by_inode(inode)?;
-
-            if seen_pids.contains_key(&pid) {
-                return None;
-            }
-            seen_pids.insert(pid, ());
-
-            let process = sys.process(Pid::from_u32(pid))?;
-
-            Some(ProcessInfo {
-                pid,
-                name: process.name().to_string_lossy().to_string(),
-                cmd: process
-                    .cmd()
-                    .iter()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .collect(),
-                user: process.user_id().map(|u| u.to_string()),
-                protocol: proto,
-                local_addr: addr,
-                state,
-            })
-        })
-        .collect())
-}
-
-fn collect_sockets(
-    port: u16,
-    check_all: bool,
-) -> io::Result<Vec<(u64, String, Option<String>, String)>> {
-    let mut sockets = Vec::new();
-
-    // TCP
-    for (file, proto) in [("/proc/net/tcp", "TCP"), ("/proc/net/tcp6", "TCP")] {
-        if let Ok(info) = parse_net_file(file, port) {
-            sockets.extend(
-                info.into_iter()
-                    .map(|(i, a, s)| (i, a, s, proto.to_string())),
-            );
+    for socket in sockets {
+        if socket.local_port() != port {
+            continue;
         }
-    }
 
-    // UDP (optional)
-    if check_all {
-        for (file, proto) in [("/proc/net/udp", "UDP"), ("/proc/net/udp6", "UDP")] {
-            if let Ok(info) = parse_net_file(file, port) {
-                sockets.extend(
-                    info.into_iter()
-                        .map(|(i, a, _)| (i, a, None, proto.to_string())),
-                );
+        let protocol = match &socket.protocol_socket_info {
+            ProtocolSocketInfo::Tcp(_) => "TCP",
+            ProtocolSocketInfo::Udp(_) => "UDP",
+        };
+
+        let state = match &socket.protocol_socket_info {
+            ProtocolSocketInfo::Tcp(tcp) => Some(format_tcp_state(tcp.state)),
+            ProtocolSocketInfo::Udp(_) => None,
+        };
+
+        let local_addr = format!("{}:{}", socket.local_addr(), socket.local_port());
+
+        for &pid in &socket.associated_pids {
+            if !seen_pids.insert(pid) {
+                continue;
+            }
+
+            if let Some(process) = sys.process(Pid::from_u32(pid)) {
+                results.push(ProcessInfo {
+                    pid,
+                    name: process.name().to_string_lossy().to_string(),
+                    cmd: process
+                        .cmd()
+                        .iter()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .collect(),
+                    user: process.user_id().map(|u| u.to_string()),
+                    protocol: protocol.to_string(),
+                    local_addr: local_addr.clone(),
+                    state: state.clone(),
+                });
             }
         }
     }
 
-    Ok(sockets)
+    Ok(results)
 }
 
-fn parse_net_file(path: &str, target_port: u16) -> io::Result<Vec<SocketInfo>> {
-    let file = fs::File::open(path)?;
-    let reader = io::BufReader::new(file);
-
-    Ok(reader
-        .lines()
-        .skip(1) // Skip header
-        .filter_map(|line| {
-            let line = line.ok()?;
-            let parts: Vec<&str> = line.split_whitespace().collect();
-
-            if parts.len() < 10 {
-                return None;
-            }
-
-            let local_addr = parts[1];
-            let port_hex = local_addr.split(':').nth(1)?;
-            let port = u16::from_str_radix(port_hex, 16).ok()?;
-
-            if port != target_port {
-                return None;
-            }
-
-            let ip_hex = local_addr.split(':').next()?;
-            let ip = parse_hex_ip(ip_hex);
-            let state = parse_tcp_state(parts[3]);
-            let inode = parts[9].parse().ok()?;
-
-            Some((inode, format!("{}:{}", ip, port), state))
-        })
-        .collect())
-}
-
-fn parse_hex_ip(hex: &str) -> String {
-    match hex.len() {
-        8 => {
-            // IPv4 (little-endian)
-            let bytes: Vec<u8> = (0..4)
-                .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0))
-                .collect();
-            format!("{}.{}.{}.{}", bytes[3], bytes[2], bytes[1], bytes[0])
-        }
-        32 => "::".to_string(), // IPv6 simplified
-        _ => "0.0.0.0".to_string(),
+fn format_tcp_state(state: TcpState) -> String {
+    match state {
+        TcpState::Established => "ESTABLISHED",
+        TcpState::SynSent => "SYN_SENT",
+        TcpState::SynReceived => "SYN_RECV",
+        TcpState::FinWait1 => "FIN_WAIT1",
+        TcpState::FinWait2 => "FIN_WAIT2",
+        TcpState::TimeWait => "TIME_WAIT",
+        TcpState::Closed => "CLOSE",
+        TcpState::CloseWait => "CLOSE_WAIT",
+        TcpState::LastAck => "LAST_ACK",
+        TcpState::Listen => "LISTEN",
+        TcpState::Closing => "CLOSING",
+        _ => "UNKNOWN",
     }
-}
-
-fn parse_tcp_state(hex: &str) -> Option<String> {
-    let state = u8::from_str_radix(hex, 16).ok()?;
-    Some(
-        match state {
-            0x01 => "ESTABLISHED",
-            0x02 => "SYN_SENT",
-            0x03 => "SYN_RECV",
-            0x04 => "FIN_WAIT1",
-            0x05 => "FIN_WAIT2",
-            0x06 => "TIME_WAIT",
-            0x07 => "CLOSE",
-            0x08 => "CLOSE_WAIT",
-            0x09 => "LAST_ACK",
-            0x0A => "LISTEN",
-            0x0B => "CLOSING",
-            _ => "UNKNOWN",
-        }
-        .to_string(),
-    )
-}
-
-fn find_pid_by_inode(inode: u64) -> Option<u32> {
-    let target = format!("socket:[{}]", inode);
-
-    fs::read_dir("/proc")
-        .ok()?
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let pid: u32 = path.file_name()?.to_str()?.parse().ok()?;
-
-            let fd_dir = path.join("fd");
-            let has_socket = fs::read_dir(fd_dir).ok()?.flatten().any(|fd| {
-                fs::read_link(fd.path())
-                    .ok()
-                    .and_then(|link| link.to_str().map(|s| s.contains(&target)))
-                    .unwrap_or(false)
-            });
-
-            has_socket.then_some(pid)
-        })
-        .next()
+    .to_string()
 }
 
 fn print_results(processes: &[ProcessInfo], verbose: bool) {

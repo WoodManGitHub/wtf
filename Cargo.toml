@@ -11,8 +11,11 @@ keywords = ["port", "process", "pid", "wtf"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
-sysinfo = "0.31"
-colored = "2.1"
+netstat2 = "0.11"
+sysinfo = "0.37"
+colored = "3.0"
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [[bin]]
