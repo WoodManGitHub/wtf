@@ -39,6 +39,7 @@ jobs:
           else
             rustup target add ${{ matrix.target }}
             cargo build --release --target ${{ matrix.target }}
+          fi
 
   build-macos:
     name: Build macOS universal
