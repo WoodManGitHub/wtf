@@ -16,11 +16,8 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            asset: wtf-linux-amd64.tar.gz
             use_cross: false
-
           - target: aarch64-unknown-linux-gnu
-            asset: wtf-linux-arm64.tar.gz
             use_cross: true
 
     steps:
@@ -42,19 +39,6 @@ jobs:
           else
             rustup target add ${{ matrix.target }}
             cargo build --release --target ${{ matrix.target }}
-          fi
-
-      - name: Package
-        run: |
-          mkdir dist
-          cp target/${{ matrix.target }}/release/wtf dist/
-          tar czf ${{ matrix.asset }} -C dist wtf
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
 
   build-macos:
     name: Build macOS universal
@@ -78,27 +62,10 @@ jobs:
           cargo build --release --target x86_64-apple-darwin
           cargo build --release --target aarch64-apple-darwin
 
-      - name: Create universal binary
-        run: |
-          mkdir -p dist
-          lipo -create \
-            target/x86_64-apple-darwin/release/wtf \
-            target/aarch64-apple-darwin/release/wtf \
-            -output dist/wtf
-
-      - name: Package
-        run: |
-          tar czf wtf-macos-universal.tar.gz -C dist wtf
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wtf-macos-universal.tar.gz
-          path: wtf-macos-universal.tar.gz
-
   build-windows:
     name: Build Windows
     runs-on: windows-latest
+
     steps:
       - uses: actions/checkout@v5
 
@@ -112,16 +79,3 @@ jobs:
 
       - name: Build
         run: cargo build --release --target x86_64-pc-windows-gnu
-
-      - name: Package
-        run: |
-          mkdir dist
-          copy target\x86_64-pc-windows-gnu\release\wtf.exe dist\
-          powershell Compress-Archive -Path dist\wtf.exe -DestinationPath wtf-windows-x86_64.zip
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wtf-windows-x86_64.zip
-          path: wtf-windows-x86_64.zip
-
