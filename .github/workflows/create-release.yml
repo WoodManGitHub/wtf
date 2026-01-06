@@ -15,7 +15,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             asset: wtf-linux-amd64.tar.gz
             use_cross: false
-
           - target: aarch64-unknown-linux-gnu
             asset: wtf-linux-arm64.tar.gz
             use_cross: true
@@ -93,11 +92,42 @@ jobs:
           name: wtf-macos-universal.tar.gz
           path: wtf-macos-universal.tar.gz
 
+  build-windows:
+    name: Build Windows 64-bit
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          setx PATH "%USERPROFILE%\.cargo\bin;%PATH%"
+
+      - name: Add target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-gnu
+
+      - name: Package
+        run: |
+          mkdir dist
+          copy target\x86_64-pc-windows-gnu\release\wtf.exe dist\
+          powershell Compress-Archive -Path dist\wtf.exe -DestinationPath wtf-windows-x86_64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wtf-windows-x86_64.zip
+          path: wtf-windows-x86_64.zip
+
   release:
     name: Create GitHub Release
     needs:
       - build-linux
       - build-macos
+      - build-windows
     runs-on: ubuntu-latest
 
     steps:
@@ -117,3 +147,4 @@ jobs:
             dist/**/wtf-linux-amd64.tar.gz
             dist/**/wtf-linux-arm64.tar.gz
             dist/**/wtf-macos-universal.tar.gz
+            dist/**/wtf-windows-x86_64.zip
