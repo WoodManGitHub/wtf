@@ -46,15 +46,31 @@ fn print_not_found(port: u16) {
     if is_root() {
         println!("{}", format!("Port {} is not in use", port).yellow());
     } else {
-        println!(
-            "{}",
-            format!(
-                "Port {} should be probably, maybe, or likely not in use... WTF!?",
-                port
-            )
-            .yellow()
-        );
-        println!("{}", "Try running with sudo?".bright_black());
+        #[cfg(unix)]
+        {
+            println!(
+                "{}",
+                format!(
+                    "Port {} should be probably, maybe, or likely not in use... WTF!?",
+                    port
+                )
+                .yellow()
+            );
+            println!("{}", "Try running with sudo?".bright_black());
+        }
+
+        #[cfg(windows)]
+        {
+            println!(
+                "{}",
+                format!(
+                    "Port {} should be probably, maybe, or likely not in use... WTF!?",
+                    port
+                )
+                .yellow()
+            );
+            println!("{}", "Try running this program as Administrator?".bright_black());
+        }
     }
 }
 
@@ -65,8 +81,35 @@ fn is_root() -> bool {
     }
     #[cfg(windows)]
     {
-        // Windows doesn't have a simple root check, assume false
-        false
+        use windows::Win32::System::Threading::*;
+        use windows::Win32::Security::*;
+        use windows::Win32::Foundation::*;
+
+        unsafe {
+            let mut token_handle = HANDLE::default();
+
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle).is_ok() {
+                let mut token_info = TOKEN_ELEVATION::default();
+                let mut ret_size = 0u32;
+
+                if GetTokenInformation(
+                    token_handle,
+                    TokenElevation,
+                    Some(&mut token_info as *mut _ as *mut _),
+                    std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                    &mut ret_size,
+                )
+                .is_ok()
+                {
+                    let _ = CloseHandle(token_handle);
+                    return token_info.TokenIsElevated != 0;
+                }
+
+                let _ =CloseHandle(token_handle);
+            }
+
+            false
+        }
     }
 }
 
